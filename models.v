@@ -39,6 +39,7 @@ pub:
 	visibility_restricted bool
 	user1_id              int
 	user2_id              int
+	bot_id                int
 	user_ids              string
 	contact_user_id       int
 	contact_nickname      string
@@ -98,6 +99,7 @@ pub:
 	author_display_name  string
 	author_is_premium    bool
 	author_premium_emoji string
+	decryption_error     string @[skip]
 }
 
 pub struct Reaction {

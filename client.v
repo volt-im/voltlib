@@ -13,8 +13,9 @@ pub:
 }
 
 pub struct Client {
-	token       string
+	token       string @[skip]
 	cookie_name string
+	encryption  ?EncryptionIdentity @[skip]
 pub:
 	base_url string
 }
@@ -51,7 +52,7 @@ pub fn (client Client) session_token() string {
 	return client.token
 }
 
-// login signs in with POST /api/auth and returns an authenticated client.
+// login signs in and unlocks account encryption when it uses this password.
 pub fn login(username string, password string, options ClientOptions) !Client {
 	client := new('', options)!
 	body := json2.encode(LoginRequest{
@@ -68,7 +69,12 @@ pub fn login(username string, password string, options ClientOptions) !Client {
 			detail:      if result.error != '' { result.error } else { 'Missing session token' }
 		}
 	}
-	return new(result.token, options)
+	signed_in := new(result.token, options)!
+	info := signed_in.account_encryption() or { return signed_in }
+	if info.enc_uses_separate_key {
+		return signed_in
+	}
+	return signed_in.unlock_account(info, password) or { signed_in }
 }
 
 struct LoginRequest {
@@ -87,6 +93,7 @@ pub struct ApiError {
 	Error
 pub:
 	status_code  int
+	api_code     string
 	detail       string
 	remaining_ms i64 // Set when a send is limited by channel slow mode.
 }
@@ -100,6 +107,7 @@ pub fn (err ApiError) code() int {
 }
 
 struct ErrorResponse {
+	code         string
 	text         string
 	error        string
 	remaining_ms i64
@@ -141,6 +149,7 @@ fn (client Client) request(method http.Method, path string, data string) !http.R
 	}
 	return ApiError{
 		status_code:  response.status_code
+		api_code:     body.code
 		detail:       detail
 		remaining_ms: body.remaining_ms
 	}

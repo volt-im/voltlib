@@ -78,7 +78,20 @@ pub:
 
 // messages returns up to 100 messages in ascending ID order. Cursors are
 // exclusive. With both cursors supplied, the server gives after precedence.
+// Encrypted messages are opened locally. Unreadable messages retain the
+// original ciphertext and include a decryption_error.
 pub fn (chat Chat) messages(page MessagePage) ![]Message {
+	messages := chat.raw_messages(page)!
+	mut decoder := MessageDecryptor{ chat: chat }
+	mut decoded := []Message{cap: messages.len}
+	for message in messages {
+		decoded << decoder.decrypt(message)
+	}
+	return decoded
+}
+
+// raw_messages returns the server's message payloads unchanged.
+pub fn (chat Chat) raw_messages(page MessagePage) ![]Message {
 	query := if page.after > 0 {
 		'?after=${page.after}'
 	} else if page.before > 0 {
@@ -106,9 +119,42 @@ struct SendMessageRequest {
 	bridge_text string @[omitempty]
 }
 
-// send_message posts text and returns the confirmed message. Provide a stable
-// client_id to deduplicate a retry after an ambiguous network failure.
+// send_message encrypts text in human DMs and returns the confirmed message.
+// Provide a stable client_id to deduplicate a retry after a network failure.
 pub fn (chat Chat) send_message(text string, options SendMessageOptions) !Message {
+	if chat.bot_id != 0 || (chat.user1_id == 0 && chat.user2_id == 0) {
+		return chat.send_raw_message(text, options)
+	}
+	if options.bridge_text != '' {
+		return error('Encrypted Volt messages cannot include plaintext bridge text')
+	}
+	if text.trim_space() == '' {
+		return error('Invalid message text')
+	}
+	for attempt in 0 .. 3 {
+		key := chat.current_chat_key()!
+		body := encrypt_text(text, key.bytes, key.epoch)!
+		message := chat.send_raw_message(body, options) or {
+			if err is ApiError {
+				if err.status_code == 409 && err.api_code == 'CHAT_KEY_CHANGED' && attempt < 2 {
+					continue
+				}
+			}
+			return err
+		}
+		mut decoder := MessageDecryptor{
+			chat: chat
+			keys: {
+				key.epoch: DecryptionKey{ bytes: key.bytes }
+			}
+		}
+		return decoder.decrypt(message)
+	}
+	return error('Could not send the encrypted Volt message')
+}
+
+// send_raw_message posts server-format text, including caller-made envelopes.
+pub fn (chat Chat) send_raw_message(text string, options SendMessageOptions) !Message {
 	body := json2.encode(SendMessageRequest{
 		text:        text
 		client_id:   options.client_id

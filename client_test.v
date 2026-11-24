@@ -1,19 +1,22 @@
 module voltlib
 
+import encoding.base64
 import io
 import json2
 import net
 import net.http
+import os
 import time
 
 struct Exchange {
-	method   http.Method = .get
-	path     string
-	cookie   string = 'token=fixture-session'
-	request  string
-	status   string = '200 OK'
-	location string
-	response string
+	method        http.Method = .get
+	path          string
+	cookie        string = 'token=fixture-session'
+	request       string
+	status        string = '200 OK'
+	location      string
+	response      string
+	check_request ?fn (http.Request)
 }
 
 fn serve_exchanges(mut listener net.TcpListener, exchanges []Exchange) {
@@ -32,6 +35,9 @@ fn serve_exchanges(mut listener net.TcpListener, exchanges []Exchange) {
 			actual := json2.decode[map[string]json2.Any](req.data) or { panic(err) }
 			expected := json2.decode[map[string]json2.Any](exchange.request) or { panic(err) }
 			assert actual == expected
+		}
+		if check_request := exchange.check_request {
+			check_request(req)
 		}
 		location := if exchange.location != '' { 'Location: ${exchange.location}\r\n' } else { '' }
 		connection.write_string('HTTP/1.1 ${exchange.status}\r\nContent-Type: application/json\r\nContent-Length: ${exchange.response.len}\r\n${location}Connection: close\r\n\r\n${exchange.response}') or {
@@ -179,6 +185,10 @@ fn test_authentication_and_errors() {
 			response: '{"token":"fixture-session"}'
 		},
 		Exchange{
+			path:     '/me/encryption'
+			response: '{}'
+		},
+		Exchange{
 			method:   .post
 			path:     '/auth'
 			cookie:   ''
@@ -192,7 +202,7 @@ fn test_authentication_and_errors() {
 		},
 		Exchange{
 			path:     '/chats/10'
-			response: '{"id":10}'
+			response: '{"id":10,"bot_id":7,"user1_id":42,"user2_id":-7}'
 		},
 		Exchange{
 			method:   .post
@@ -249,5 +259,205 @@ fn test_authentication_and_errors() {
 		assert err.msg().contains('/api/me')
 	}
 	assert new('', base_url: base_url)!.emotes()! == ['wave']
+	done.wait()
+}
+
+struct EncryptionVectors {
+	password        string
+	salt            string
+	enc_private_key string
+	enc_public_key  string
+	wrapped         string
+	raw             string
+	message         string
+}
+
+// This fixture was generated with WebCrypto for the Volt native-client tests.
+fn encryption_vectors() !EncryptionVectors {
+	return json2.decode[EncryptionVectors](os.read_file(os.join_path(@DIR, 'testdata',
+		'e2ee_vectors.json'))!)
+}
+
+fn test_webcrypto_message_and_private_key() {
+	vectors := encryption_vectors()!
+	private_key := unlock_private_key(vectors.password, vectors.salt, vectors.enc_private_key)!
+	raw := private_key.unwrap(vectors.wrapped)!
+	assert base64.encode(raw) == vectors.raw
+	envelope := parse_message_envelope(vectors.message)!
+	assert envelope.epoch == 3
+	assert envelope.open(raw)! == 'Привет, Volt! 👋'
+	assert parse_message_envelope(encrypt_text('hello ⚡', raw, 3)!)!.open(raw)! == 'hello ⚡'
+	legacy := parse_message_envelope(vectors.message.replace(',"epoch":3', '').replace('"', '&quot;'))!
+	assert legacy.epoch == 0
+	assert legacy.open(raw)! == 'Привет, Volt! 👋'
+	if _ := envelope.open([]u8{len: aes_key_size}) {
+		assert false, 'accepted ciphertext with the wrong key'
+	}
+	if _ := unlock_private_key(vectors.password + 'x', vectors.salt, vectors.enc_private_key) {
+		assert false, 'unlocked account with the wrong password'
+	}
+}
+
+fn test_encrypted_chat_initialization_and_rotation() {
+	vectors := encryption_vectors()!
+	private_key := unlock_private_key(vectors.password, vectors.salt, vectors.enc_private_key)!
+	raw := base64.decode(vectors.raw)
+	keys := json2.encode({
+		'42': vectors.wrapped
+		'43': vectors.wrapped
+	})
+	recipients := [
+		EncryptionRecipient{ id: 42, enc_public_key: vectors.enc_public_key },
+		EncryptionRecipient{ id: 43, enc_public_key: vectors.enc_public_key },
+	]
+	info := ChatEncryption{ chat_id: 12, enc_epoch: 3, enc_keys: keys, users: recipients }
+	current := ChatEncryption{
+		...info
+		enc_epoch:       4
+		enc_key_history: json2.encode({
+			'3': keys
+		})
+	}
+	confirmed := Message{ id: 5, text: encrypt_text('Original confirmation', raw, 4)! }
+	page := [
+		Message{ id: 3, text: 'Older plaintext' },
+		Message{ id: 4, text: vectors.message },
+		confirmed,
+		Message{ id: 6, text: encrypt_text('future key', raw, 5)! },
+		Message{ id: 7, text: 'enc:v1:broken' },
+	]
+	base_url, done := mock_server([
+		Exchange{
+			method:   .post
+			path:     '/auth'
+			cookie:   ''
+			response: '{"token":"fixture-session"}'
+		},
+		Exchange{
+			path:     '/me/encryption'
+			response: json2.encode(AccountEncryption{
+				user_id:         42
+				enc_private_key: vectors.enc_private_key
+				enc_key_salt:    vectors.salt
+			})
+		},
+		Exchange{
+			path:     '/chats/12'
+			response: '{"id":12,"user1_id":42,"user2_id":43}'
+		},
+		Exchange{
+			path:     '/chats/12/encryption'
+			response: json2.encode(ChatEncryption{ ...info, enc_keys: '' })
+		},
+		Exchange{
+			method:        .post
+			path:          '/chats/12/encryption'
+			check_request: fn [private_key] (req http.Request) {
+				body := json2.decode[SaveChatKeys](req.data) or { panic(err) }
+				assert req.data.contains('"expected_keys":""')
+				assert body.expected_keys == ''
+				assert body.enc_epoch == 3
+				created := decode_key_map(body.enc_keys) or { panic(err) }
+				assert created.len == 2
+				assert created['42'] != created['43']
+				assert private_key.unwrap(created['42'])! == private_key.unwrap(created['43'])!
+			}
+			status:        '409 Conflict'
+			response:      '{"status":"fail","text":"Chat keys changed; retry"}'
+		},
+		Exchange{
+			path:     '/chats/12/encryption'
+			response: json2.encode(info)
+		},
+		Exchange{
+			method:        .post
+			path:          '/chats/12/messages'
+			check_request: fn [raw] (req http.Request) {
+				assert !req.data.contains('Hello DM')
+				body := json2.decode[SendMessageRequest](req.data) or { panic(err) }
+				assert body.client_id == 'fixture-send'
+				assert body.text.starts_with(encrypted_prefix)
+				envelope := parse_message_envelope(body.text) or { panic(err) }
+				assert envelope.epoch == 3
+				assert envelope.open(raw)! == 'Hello DM'
+			}
+			status:        '409 Conflict'
+			response:      '{"status":"fail","code":"CHAT_KEY_CHANGED","text":"Channel encryption changed; retry"}'
+		},
+		Exchange{
+			path:     '/chats/12/encryption'
+			response: json2.encode(current)
+		},
+		Exchange{
+			method:        .post
+			path:          '/chats/12/messages'
+			check_request: fn [raw] (req http.Request) {
+				body := json2.decode[SendMessageRequest](req.data) or { panic(err) }
+				assert body.client_id == 'fixture-send'
+				envelope := parse_message_envelope(body.text) or { panic(err) }
+				assert envelope.epoch == 4
+				assert envelope.open(raw)! == 'Hello DM'
+			}
+			response:      json2.encode(confirmed)
+		},
+		Exchange{
+			path:     '/chats/12/messages'
+			response: json2.encode(page)
+		},
+		Exchange{
+			path:     '/chats/12/encryption'
+			response: json2.encode(current)
+		},
+		Exchange{
+			path:     '/chats/12/messages'
+			response: json2.encode(page)
+		},
+	])!
+	client := login('volt', vectors.password, base_url: base_url)!
+	assert client.encryption_unlocked()
+	assert !json2.encode(client).contains('fixture-session')
+	assert !json2.encode(client).contains('"encryption"')
+	chat := client.chat(12)!
+	sent := chat.send_message('Hello DM', client_id: 'fixture-send')!
+	assert sent.id == 5
+	assert sent.text == 'Original confirmation'
+	messages := chat.messages()!
+	assert messages[0].text == 'Older plaintext'
+	assert messages[1].text == 'Привет, Volt! 👋'
+	assert messages[2].text == 'Original confirmation'
+	assert messages[3].text == page[3].text
+	assert messages[3].decryption_error.contains('no key')
+	assert messages[4].decryption_error.contains('Invalid')
+	assert chat.raw_messages()![1].text == vectors.message
+	done.wait()
+}
+
+fn test_unlock_separate_encryption_key() {
+	vectors := encryption_vectors()!
+	info := json2.encode(AccountEncryption{
+		user_id:               42
+		enc_private_key:       vectors.enc_private_key
+		enc_key_salt:          vectors.salt
+		enc_uses_separate_key: true
+	})
+	base_url, done := mock_server([
+		Exchange{ method: .post, path: '/auth', cookie: '', response: '{"token":"fixture-session"}' },
+		Exchange{ path: '/me/encryption', response: info },
+		Exchange{ path: '/me/encryption', response: info },
+		Exchange{ path: '/chats/12/messages', response: json2.encode([Message{ text: vectors.message }]) },
+	])!
+	locked := login('volt', 'sign-in-password', base_url: base_url)!
+	assert !locked.encryption_unlocked()
+	chat := Chat{ client: locked, id: 12, user1_id: 42, user2_id: 43 }
+	if _ := chat.send_message('must stay local') {
+		assert false, 'sent a DM without unlocking encryption'
+	} else {
+		assert err.msg().contains('Unlock')
+	}
+	unlocked := locked.unlock_encryption(vectors.password)!
+	assert unlocked.encryption_unlocked()
+	messages := chat.messages()!
+	assert messages[0].text == vectors.message
+	assert messages[0].decryption_error.contains('Unlock')
 	done.wait()
 }

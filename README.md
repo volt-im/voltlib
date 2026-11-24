@@ -59,11 +59,34 @@ requests. With a known chat ID, use `chat := client.chat(chat_id)!`.
 order. Pass `before: id` to page backward or `after: id` to page forward. Both
 cursors are exclusive.
 
-Send plain text to channels. Direct messages require an encrypted `enc:v1:`
-envelope. Provide that envelope as the message text when sending to a DM.
-Received message text contains the original payload, including ciphertext for
-encrypted DMs. Pass the same `client_id` on retries to let Volt deduplicate a
-send.
+## Encrypted direct messages
+
+`chat.send_message(text)` takes plaintext and encrypts human DMs locally.
+It creates and shares keys when a chat needs them and retries if Volt reports
+a key change. Channels, groups, and bot chats use plaintext. Pass the same
+`client_id` on retries to let Volt deduplicate a send.
+
+`login(username, password)` unlocks existing account encryption when it uses
+the sign-in password. When signing in with a token or using a separate
+encryption key, unlock explicitly before fetching chats.
+
+```v
+locked := voltlib.new(session_token)!
+client := locked.unlock_encryption(encryption_password_or_key)!
+chat := client.chat(chat_id)!
+sent := chat.send_message('Hello from V')!
+println(sent.text)
+```
+
+Use `client.encryption_unlocked()` to check the unlock state. Accounts without
+encryption keys can set them up by signing in to Volt once.
+
+`chat.messages()` decrypts current and historical messages. An unreadable
+message retains its ciphertext and reports the reason in
+`message.decryption_error`. For apps that manage their own encryption,
+`chat.raw_messages()` and `chat.send_raw_message(text)` use the server format.
+
+## Errors
 
 HTTP failures return `voltlib.ApiError` with `status_code` and `detail`.
 For channel slow mode, `remaining_ms` gives the time until the next send.
@@ -72,4 +95,5 @@ returned by `login()` regardless of status.
 
 ## Test
 
-Run `v test .` from the module checkout. Tests use a local fixture HTTP server.
+Run `v test .` from the module checkout. Tests use a local fixture HTTP server
+and Volt's WebCrypto test vectors. Encryption uses the mbedTLS bundled with V.
