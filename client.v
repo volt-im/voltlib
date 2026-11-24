@@ -1,0 +1,151 @@
+module voltlib
+
+import json2
+import net.http
+import net.urllib
+
+pub const default_base_url = 'https://app.volt.im'
+
+@[params]
+pub struct ClientOptions {
+pub:
+	base_url string = default_base_url
+}
+
+pub struct Client {
+	token       string
+	cookie_name string
+pub:
+	base_url string
+}
+
+// new creates a client with an existing session token. An empty token creates
+// an anonymous client.
+pub fn new(token string, options ClientOptions) !Client {
+	base_url := options.base_url.trim_right('/')
+	origin := urllib.parse(base_url) or { return error('Invalid Volt base URL') }
+	if origin.scheme !in ['http', 'https'] || origin.hostname() == '' || origin.path != ''
+		|| base_url.contains_any('@?#') {
+		return error('Volt base URL must be an HTTP or HTTPS origin')
+	}
+	for byte in token {
+		if byte < 0x21 || byte > 0x7e || byte in [`"`, `,`, `;`, `\\`] {
+			return error('Invalid Volt session token')
+		}
+	}
+	host := origin.hostname().trim_right('.').to_lower()
+	return Client{
+		base_url:    '${origin.scheme}://${origin.host}'
+		token:       token
+		cookie_name: if host == 'app.volt.im' { '__Host-volt-token' } else { 'token' }
+	}
+}
+
+// str returns the client origin with credentials omitted.
+pub fn (client Client) str() string {
+	return 'voltlib.Client(${client.base_url})'
+}
+
+// session_token returns the credential for callers that need to persist it.
+pub fn (client Client) session_token() string {
+	return client.token
+}
+
+// login signs in with POST /api/auth and returns an authenticated client.
+pub fn login(username string, password string, options ClientOptions) !Client {
+	client := new('', options)!
+	body := json2.encode(LoginRequest{
+		username: username
+		password: password
+	})
+	response := client.request(.post, '/auth', body)!
+	result := json2.decode[AuthResponse](response.body) or {
+		return error('Invalid Volt API response for POST /api/auth')
+	}
+	if result.error != '' || result.token == '' {
+		return ApiError{
+			status_code: response.status_code
+			detail:      if result.error != '' { result.error } else { 'Missing session token' }
+		}
+	}
+	return new(result.token, options)
+}
+
+struct LoginRequest {
+	username string
+	password string
+}
+
+struct AuthResponse {
+	token string
+	error string
+}
+
+// ApiError reports a failed Volt response. status_code is the HTTP status,
+// including 200 when /api/auth returns a login error in a successful response.
+pub struct ApiError {
+	Error
+pub:
+	status_code  int
+	detail       string
+	remaining_ms i64 // Set when a send is limited by channel slow mode.
+}
+
+pub fn (err ApiError) msg() string {
+	return 'Volt API HTTP ${err.status_code} — ${err.detail}'
+}
+
+pub fn (err ApiError) code() int {
+	return err.status_code
+}
+
+struct ErrorResponse {
+	text         string
+	error        string
+	remaining_ms i64
+}
+
+fn (client Client) request(method http.Method, path string, data string) !http.Response {
+	mut header := http.new_header(key: .accept, value: 'application/json')
+	if data != '' {
+		header.set(.content_type, 'application/json')
+	}
+	mut cookies := map[string]string{}
+	if client.token != '' {
+		cookies[client.cookie_name] = client.token
+	}
+	response := http.fetch(
+		url:            '${client.base_url}/api${path}'
+		method:         method
+		header:         header
+		data:           data
+		cookies:        cookies
+		allow_redirect: false
+		max_retries:    1
+	)!
+	if response.status_code >= 200 && response.status_code < 300 {
+		return response
+	}
+	body := json2.decode[ErrorResponse](response.body) or { ErrorResponse{} }
+	detail := if body.error != '' {
+		body.error
+	} else if body.text != '' {
+		body.text
+	} else if body.remaining_ms > 0 {
+		'Channel slow mode'
+	} else {
+		http.status_from_int(response.status_code).str()
+	}
+	return ApiError{
+		status_code:  response.status_code
+		detail:       detail
+		remaining_ms: body.remaining_ms
+	}
+}
+
+fn (client Client) request_json[T](method http.Method, path string, data string) !T {
+	response := client.request(method, path, data)!
+	return json2.decode[T](response.body) or {
+		return error('Invalid Volt API response for ${method} /api${path}')
+	}
+}
