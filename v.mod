@@ -1,7 +1,7 @@
 Module {
 	name: 'voltlib'
 	description: 'V client for the Volt.im REST API'
-	version: '0.1.0'
+	version: '0.2.0'
 	license: 'AGPL-3.0'
 	dependencies: []
 }

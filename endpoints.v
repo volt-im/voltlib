@@ -3,31 +3,66 @@ module voltlib
 import json2
 
 pub fn (client Client) me() !User {
-	return client.request_json[User](.get, '/me', '')
+	user := client.request_json[User](.get, '/me', '')!
+	return User{
+		...user
+		client: client
+	}
 }
 
 pub fn (client Client) servers() ![]Server {
-	return client.request_json[[]Server](.get, '/servers', '')
+	servers := client.request_json[[]Server](.get, '/servers', '')!
+	return servers.map(it.with_client(client))
 }
 
 pub fn (client Client) server(server_id int) !Server {
-	return client.request_json[Server](.get, '/servers/${server_id}', '')
+	server := client.request_json[Server](.get, '/servers/${server_id}', '')!
+	return server.with_client(client)
 }
 
-pub fn (client Client) server_chats(server_id int) ![]Chat {
-	return client.request_json[[]Chat](.get, '/servers/${server_id}/chats', '')
+fn (server Server) with_client(client Client) Server {
+	return Server{
+		...server
+		client: client
+		chats:  bind_chats(server.chats, client)
+	}
+}
+
+// chats fetches the accessible channels in this server.
+pub fn (server Server) chats() ![]Chat {
+	chats := server.client.request_json[[]Chat](.get, '/servers/${server.id}/chats', '')!
+	return bind_chats(chats, server.client)
 }
 
 pub fn (client Client) chat(chat_id int) !Chat {
-	return client.request_json[Chat](.get, '/chats/${chat_id}', '')
+	chat := client.request_json[Chat](.get, '/chats/${chat_id}', '')!
+	return Chat{
+		...chat
+		client: client
+	}
 }
 
-pub fn (client Client) dm_chats() ![]Chat {
-	return client.request_json[[]Chat](.get, '/me/chats', '')
+fn bind_chats(chats []Chat, client Client) []Chat {
+	return chats.map(Chat{
+		...it
+		client: client
+	})
 }
 
-pub fn (client Client) all_chats() !ChatList {
-	return client.request_json[ChatList](.get, '/allchats', '')
+// chats fetches the authenticated user's direct message chats.
+pub fn (user User) chats() ![]Chat {
+	chats := user.client.request_json[[]Chat](.get, '/me/chats', '')!
+	return bind_chats(chats, user.client)
+}
+
+// all_chats fetches the authenticated user's servers and chats in one request.
+pub fn (user User) all_chats() !ChatList {
+	list := user.client.request_json[ChatList](.get, '/allchats', '')!
+	return ChatList{
+		...list
+		servers:   list.servers.map(it.with_client(user.client))
+		all_chats: bind_chats(list.all_chats, user.client)
+	}
 }
 
 pub fn (client Client) emotes() ![]string {
@@ -43,7 +78,7 @@ pub:
 
 // messages returns up to 100 messages in ascending ID order. Cursors are
 // exclusive. With both cursors supplied, the server gives after precedence.
-pub fn (client Client) messages(chat_id int, page MessagePage) ![]Message {
+pub fn (chat Chat) messages(page MessagePage) ![]Message {
 	query := if page.after > 0 {
 		'?after=${page.after}'
 	} else if page.before > 0 {
@@ -51,7 +86,7 @@ pub fn (client Client) messages(chat_id int, page MessagePage) ![]Message {
 	} else {
 		''
 	}
-	return client.request_json[[]Message](.get, '/chats/${chat_id}/messages${query}', '')
+	return chat.client.request_json[[]Message](.get, '/chats/${chat.id}/messages${query}', '')
 }
 
 @[params]
@@ -73,7 +108,7 @@ struct SendMessageRequest {
 
 // send_message posts text and returns the confirmed message. Provide a stable
 // client_id to deduplicate a retry after an ambiguous network failure.
-pub fn (client Client) send_message(chat_id int, text string, options SendMessageOptions) !Message {
+pub fn (chat Chat) send_message(text string, options SendMessageOptions) !Message {
 	body := json2.encode(SendMessageRequest{
 		text:        text
 		client_id:   options.client_id
@@ -81,5 +116,5 @@ pub fn (client Client) send_message(chat_id int, text string, options SendMessag
 		thread_id:   options.thread_id
 		bridge_text: options.bridge_text
 	})
-	return client.request_json[Message](.post, '/chats/${chat_id}/messages', body)
+	return chat.client.request_json[Message](.post, '/chats/${chat.id}/messages', body)
 }

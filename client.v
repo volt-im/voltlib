@@ -106,6 +106,9 @@ struct ErrorResponse {
 }
 
 fn (client Client) request(method http.Method, path string, data string) !http.Response {
+	if client.base_url == '' {
+		return error('Volt request requires a configured client')
+	}
 	mut header := http.new_header(key: .accept, value: 'application/json')
 	if data != '' {
 		header.set(.content_type, 'application/json')

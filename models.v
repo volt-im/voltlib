@@ -2,6 +2,7 @@ module voltlib
 
 // User is the authenticated account. The API sends its ID as a JSON string.
 pub struct User {
+	client Client @[skip]
 pub:
 	id           string
 	name         string
@@ -9,6 +10,7 @@ pub:
 }
 
 pub struct Server {
+	client Client @[skip]
 pub:
 	id           int
 	name         string
@@ -27,6 +29,7 @@ pub:
 }
 
 pub struct Chat {
+	client Client @[skip]
 pub:
 	id                    int
 	server_id             int

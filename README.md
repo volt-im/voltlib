@@ -24,8 +24,13 @@ fn main() {
 	println('Signed in as ${me.name}')
 
 	for server in client.servers()! {
-		println('${server.id} ${server.name}')
+		for chat in server.chats()! {
+			println('${server.name}/${chat.name}')
+		}
 	}
+
+	dms := me.chats()!
+	println('${dms.len} direct message chats')
 }
 ```
 
@@ -35,22 +40,24 @@ with `voltlib.login(username, password)!`. Supply
 `base_url: 'http://localhost:8077'` to either constructor to use a local
 Volt server.
 
-| Client method | HTTP endpoint |
+| Method | HTTP endpoint |
 | --- | --- |
-| `me()` | `GET /api/me` |
-| `servers()` | `GET /api/servers` |
-| `server(server_id)` | `GET /api/servers/:server_id` |
-| `server_chats(server_id)` | `GET /api/servers/:server_id/chats` |
-| `chat(chat_id)` | `GET /api/chats/:chat_id` |
-| `dm_chats()` | `GET /api/me/chats` |
-| `all_chats()` | `GET /api/allchats` |
-| `messages(chat_id, before: id)` | `GET /api/chats/:chat_id/messages` |
-| `send_message(chat_id, text)` | `POST /api/chats/:chat_id/messages` |
-| `emotes()` | `GET /api/emotes` (public) |
+| `client.me()` | `GET /api/me` |
+| `client.servers()` | `GET /api/servers` |
+| `client.server(server_id)` | `GET /api/servers/:server_id` |
+| `server.chats()` | `GET /api/servers/:server_id/chats` |
+| `client.chat(chat_id)` | `GET /api/chats/:chat_id` |
+| `me.chats()` | `GET /api/me/chats` |
+| `me.all_chats()` | `GET /api/allchats` |
+| `chat.messages(before: id)` | `GET /api/chats/:chat_id/messages` |
+| `chat.send_message(text)` | `POST /api/chats/:chat_id/messages` |
+| `client.emotes()` | `GET /api/emotes` (public) |
 
-`messages(chat_id)` returns the latest page, up to 100 messages in ascending
-ID order. Pass `before: id` to page backward or `after: id` to page forward.
-Both cursors are exclusive.
+Servers and chats returned by the API use the client's session for follow-up
+requests. With a known chat ID, use `chat := client.chat(chat_id)!`.
+`chat.messages()` returns the latest page, up to 100 messages in ascending ID
+order. Pass `before: id` to page backward or `after: id` to page forward. Both
+cursors are exclusive.
 
 Send plain text to channels. Direct messages require an encrypted `enc:v1:`
 envelope. Provide that envelope as the message text when sending to a DM.

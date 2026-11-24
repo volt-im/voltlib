@@ -68,6 +68,15 @@ fn test_client_configuration() {
 	}
 }
 
+fn test_unbound_resource_returns_an_error() {
+	server := Server{ id: 13 }
+	if _ := server.chats() {
+		assert false, 'fetched chats without a configured client'
+	} else {
+		assert err.msg() == 'Volt request requires a configured client'
+	}
+}
+
 fn test_documented_api() {
 	base_url, done := mock_server([
 		Exchange{
@@ -76,7 +85,7 @@ fn test_documented_api() {
 		},
 		Exchange{
 			path:     '/servers'
-			response: '[{"id":13,"name":"test"}]'
+			response: '[{"id":13,"name":"test","chats":[{"id":10}]}]'
 		},
 		Exchange{
 			path:     '/servers/13'
@@ -99,6 +108,14 @@ fn test_documented_api() {
 			response: '{"servers":[{"id":13}],"all_chats":[{"id":10},{"id":11}],"conversations":[{"chat_id":11,"cleared_id":99}]}'
 		},
 		Exchange{
+			path:     '/servers/13/chats'
+			response: '[{"id":10}]'
+		},
+		Exchange{
+			path:     '/chats/11/messages'
+			response: '[]'
+		},
+		Exchange{
 			path:     '/chats/10/messages'
 			response: '[{"id":101,"time":2147483648,"reactions":[{"name":"⚡","count":1,"user_ids":[42]}]}]'
 		},
@@ -118,22 +135,32 @@ fn test_documented_api() {
 		},
 	])!
 	client := new('fixture-session', base_url: base_url + '/')!
-	assert client.me()!.id == '42'
-	assert client.servers()![0].name == 'test'
-	assert client.server(13)!.is_community
-	assert client.server_chats(13)![0].id == 10
-	assert client.chat(10)!.server_id == 13
-	assert client.dm_chats()![0].contact_nickname == 'Volt'
-	all := client.all_chats()!
+	me := client.me()!
+	assert me.id == '42'
+	servers := client.servers()!
+	assert servers[0].name == 'test'
+	server := client.server(13)!
+	assert server.is_community
+	channels := server.chats()!
+	assert channels[0].id == 10
+	chat := client.chat(10)!
+	assert chat.server_id == 13
+	dms := me.chats()!
+	assert dms[0].contact_nickname == 'Volt'
+	all := me.all_chats()!
 	assert all.servers[0].id == 13
 	assert all.all_chats.len == 2
 	assert all.conversations[0].cleared_id == 99
-	messages := client.messages(10)!
+	assert !'${all}'.contains(client.session_token())
+	assert !json2.encode(all).contains('"client":')
+	assert all.servers[0].chats()![0].id == chat.id
+	assert dms[0].messages()!.len == 0
+	messages := channels[0].messages()!
 	assert messages[0].time == i64(2147483648)
 	assert messages[0].reactions[0].user_ids == [42]
-	assert client.messages(10, before: 101)!.len == 0
-	assert client.messages(10, after: 101, before: 999)!.len == 0
-	sent := client.send_message(10, 'A "quoted" Volt ⚡\nmessage',
+	assert chat.messages(before: 101)!.len == 0
+	assert all.all_chats[0].messages(after: 101, before: 999)!.len == 0
+	sent := servers[0].chats[0].send_message('A "quoted" Volt ⚡\nmessage',
 		client_id:   'send-1'
 		reply_to_id: 101
 	)!
@@ -162,6 +189,10 @@ fn test_authentication_and_errors() {
 			path:     '/me'
 			status:   '401 Unauthorized'
 			response: '{"status":"fail","text":"not authorized"}'
+		},
+		Exchange{
+			path:     '/chats/10'
+			response: '{"id":10}'
 		},
 		Exchange{
 			method:   .post
@@ -200,7 +231,8 @@ fn test_authentication_and_errors() {
 		assert err.code() == 401
 		assert err.msg().contains('not authorized')
 	}
-	if _ := client.send_message(10, 'hello') {
+	chat := client.chat(10)!
+	if _ := chat.send_message('hello') {
 		assert false, 'accepted rate-limited send'
 	} else {
 		assert err.code() == 429
