@@ -36,6 +36,10 @@ pub fn (server Server) chats() ![]Chat {
 
 pub fn (client Client) chat(chat_id int) !Chat {
 	chat := client.request_json[Chat](.get, '/chats/${chat_id}', '')!
+	return chat.with_client(client)
+}
+
+fn (chat Chat) with_client(client Client) Chat {
 	return Chat{
 		...chat
 		client: client
@@ -43,10 +47,7 @@ pub fn (client Client) chat(chat_id int) !Chat {
 }
 
 fn bind_chats(chats []Chat, client Client) []Chat {
-	return chats.map(Chat{
-		...it
-		client: client
-	})
+	return chats.map(it.with_client(client))
 }
 
 // chats fetches the authenticated user's direct message chats.

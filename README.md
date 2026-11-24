@@ -1,6 +1,6 @@
 # voltlib
 
-A V client for the [Volt.im REST API](https://app.volt.im/#api). It uses
+A V client for the [Volt.im REST API](https://app.volt.im/docs/api). It uses
 V's standard library and defaults to `https://app.volt.im`.
 
 ## Install
@@ -47,6 +47,7 @@ Volt server.
 | `client.server(server_id)` | `GET /api/servers/:server_id` |
 | `server.chats()` | `GET /api/servers/:server_id/chats` |
 | `client.chat(chat_id)` | `GET /api/chats/:chat_id` |
+| `client.open_bot_chat(username)` | `POST /api/bots/:username/chat` |
 | `me.chats()` | `GET /api/me/chats` |
 | `me.all_chats()` | `GET /api/allchats` |
 | `chat.messages(before: id)` | `GET /api/chats/:chat_id/messages` |
@@ -86,12 +87,69 @@ message retains its ciphertext and reports the reason in
 `message.decryption_error`. For apps that manage their own encryption,
 `chat.raw_messages()` and `chat.send_raw_message(text)` use the server format.
 
+## Direct bot chats
+
+A signed-in user can open a bot conversation and send text with the regular
+chat methods. The public **Start chat** button sends `/start`. [Volt direct bot chat docs](https://app.volt.im/docs/api#direct-bot-chats)
+
+```v
+client := voltlib.new(session_token)!
+chat := client.open_bot_chat('examplebot')!
+chat.send_message('Hello bot')!
+```
+
+On the bot side, use the token issued when you register the bot.
+[Volt bot registration](https://app.volt.im/docs/api#register-bot)
+
+```v
+import os
+import time
+import voltlib
+
+fn main() {
+	bot := voltlib.new_bot(os.getenv('VOLT_BOT_TOKEN'))!
+	mut offset := i64(0)
+	for {
+		updates := bot.updates(offset: offset)!
+		for update in updates {
+			if message := update.message {
+				message.chat.send_message('Thanks for your message',
+					reply_to_message_id: message.message_id
+					client_id: 'reply-${update.update_id}'
+				)!
+			}
+			offset = update.update_id + 1
+		}
+		if updates.len == 0 {
+			time.sleep(time.second)
+		}
+	}
+}
+```
+
+The polling offset acknowledges all earlier updates, including inline queries
+and callback queries. Advance it after processing. A stable `client_id` lets
+Volt deduplicate retried sends.
+
+| Bot method | HTTP endpoint |
+| --- | --- |
+| `bot.updates(offset: offset, limit: 20)` | `POST /bot/getUpdates` |
+| `bot.chat(chat_id)` | `POST /bot/getChat` |
+| `chat.send_message(text, reply_to_message_id: id)` | `POST /bot/sendMessage` |
+| `message.edit_text(text)` | `POST /bot/editMessageText` |
+| `message.delete()` | `POST /bot/deleteMessage` |
+
+If you have a stored message ID, use `chat.edit_message_text(id, text)` or
+`chat.delete_message(id)`.
+
 ## Errors
 
 HTTP failures return `voltlib.ApiError` with `status_code` and `detail`.
 For channel slow mode, `remaining_ms` gives the time until the next send.
 Volt can also return sign-in failures with HTTP status 200, so check the error
 returned by `login()` regardless of status.
+Bot API failures return `voltlib.BotApiError` with `status_code`,
+`error_code`, and `description`.
 
 ## Test
 

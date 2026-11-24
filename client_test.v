@@ -10,8 +10,10 @@ import time
 
 struct Exchange {
 	method        http.Method = .get
+	prefix        string      = '/api'
 	path          string
 	cookie        string = 'token=fixture-session'
+	authorization string
 	request       string
 	status        string = '200 OK'
 	location      string
@@ -27,8 +29,9 @@ fn serve_exchanges(mut listener net.TcpListener, exchanges []Exchange) {
 		mut reader := io.new_buffered_reader(reader: connection)
 		req := http.parse_request(mut reader) or { panic(err) }
 		assert req.method == exchange.method
-		assert req.url == '/api' + exchange.path
+		assert req.url == exchange.prefix + exchange.path
 		assert (req.header.get(.cookie) or { '' }) == exchange.cookie
+		assert (req.header.get(.authorization) or { '' }) == exchange.authorization
 		assert (req.header.get(.accept) or { '' }) == 'application/json'
 		if exchange.request != '' {
 			assert (req.header.get(.content_type) or { '' }) == 'application/json'
@@ -459,5 +462,120 @@ fn test_unlock_separate_encryption_key() {
 	messages := chat.messages()!
 	assert messages[0].text == vectors.message
 	assert messages[0].decryption_error.contains('Unlock')
+	done.wait()
+}
+
+const fixture_bot_token = 'voltbot_fixture'
+
+fn bot_exchange(path string, request string, response string) Exchange {
+	return Exchange{
+		method:        .post
+		prefix:        '/bot'
+		path:          path
+		cookie:        ''
+		authorization: 'Bearer ' + fixture_bot_token
+		request:       request
+		response:      response
+	}
+}
+
+fn test_direct_bot_chats() {
+	bot_chat := '{"id":42,"type":"private","first_name":"Volt User","username":"volt"}'
+	user := '{"id":8,"username":"volt","first_name":"Volt User","is_bot":false}'
+	incoming := '{"message_id":123,"date":1710000000,"from":${user},"chat":${bot_chat},"text":"Hello bot"}'
+	bot_user := '{"id":9,"username":"examplebot","first_name":"Example","is_bot":true}'
+	outgoing := '{"message_id":124,"from":${bot_user},"chat":${bot_chat},"text":"Hello from the bot","reply_to_message_id":123}'
+	edited := '{"message_id":124,"from":${bot_user},"chat":${bot_chat},"text":"Edited","edit_date":1710000001}'
+	base_url, done := mock_server([
+		Exchange{
+			method:   .post
+			path:     '/bots/examplebot/chat'
+			response: '{"id":42,"bot_id":9,"user1_id":8}'
+		},
+		Exchange{
+			method:   .post
+			path:     '/chats/42/messages'
+			request:  '{"text":"Hello bot"}'
+			response: '{"id":123,"text":"Hello bot"}'
+		},
+		bot_exchange('/getUpdates', '{"offset":0,"limit":10}',
+			'{"ok":true,"result":[{"update_id":3000000000,"inline_query":{"id":"3000000000","from":${user},"query":"find","offset":"next"}},{"update_id":3000000001,"message":${incoming}},{"update_id":3000000002,"callback_query":{"id":"3000000002","from":${user},"message":${outgoing},"chat_instance":"42","data":"confirm"}}]}'),
+		bot_exchange('/sendMessage',
+			'{"chat_id":42,"text":"Hello from the bot","client_id":"answer-123","reply_parameters":{"message_id":123},"reply_markup":{"inline_keyboard":[[{"text":"Confirm","callback_data":"confirm"}]]}}',
+			'{"ok":true,"result":${outgoing}}'),
+		bot_exchange('/getChat', '{"chat_id":42}', '{"ok":true,"result":${bot_chat}}'),
+		bot_exchange('/editMessageText', '{"chat_id":42,"message_id":124,"text":"Edited"}',
+			'{"ok":true,"result":${edited}}'),
+		bot_exchange('/deleteMessage', '{"chat_id":42,"message_id":124}', '{"ok":true,"result":true}'),
+		bot_exchange('/getUpdates', '{"offset":3000000003,"limit":100}', '{"ok":true,"result":[]}'),
+	])!
+	client := new('fixture-session', base_url: base_url)!
+	user_chat := client.open_bot_chat('ExampleBot')!
+	assert user_chat.bot_id == 9
+	assert user_chat.send_message('Hello bot')!.id == 123
+	bot := new_bot(fixture_bot_token, base_url: base_url)!
+	assert !'${bot}'.contains(fixture_bot_token)
+	assert !json2.encode(bot).contains(fixture_bot_token)
+	updates := bot.updates(limit: 10)!
+	assert updates.len == 3
+	assert updates[0].inline_query?.query == 'find'
+	message := updates[1].message?
+	assert message.sender.username == 'volt'
+	assert message.date == 1710000000
+	assert message.chat.type == 'private'
+	callback := updates[2].callback_query?
+	assert callback.data == 'confirm'
+	assert callback.message.chat.id == message.chat.id
+	reply := message.chat.send_message('Hello from the bot',
+		reply_to_message_id: message.message_id
+		client_id:           'answer-123'
+		reply_markup:        BotReplyMarkup{
+			inline_keyboard: [[BotKeyboardButton{ text: 'Confirm', callback_data: 'confirm' }]]
+		}
+	)!
+	assert reply.sender.is_bot
+	assert reply.reply_to_message_id == message.message_id
+	assert bot.chat(message.chat.id)!.first_name == 'Volt User'
+	result := reply.edit_text('Edited')!
+	assert result.edit_date == 1710000001
+	assert result.delete()!
+	assert bot.updates(offset: updates.last().update_id + 1)!.len == 0
+	done.wait()
+}
+
+fn test_bot_api_errors() {
+	closed := bot_exchange('/getChat', '{"chat_id":42}',
+		'{"ok":false,"error_code":403,"description":"Chat is closed"}')
+	base_url, done := mock_server([
+		Exchange{ ...closed, status: '403 Forbidden' },
+		bot_exchange('/getUpdates', '{"offset":0,"limit":100}',
+			'{"ok":false,"error_code":429,"description":"Try again later"}'),
+		bot_exchange('/getUpdates', '{"offset":0,"limit":100}', '{"ok":true}'),
+	])!
+	bot := new_bot(fixture_bot_token, base_url: base_url)!
+	if _ := bot.chat(42) {
+		assert false, 'accepted a closed bot chat'
+	} else {
+		assert err is BotApiError
+		assert (err as BotApiError).status_code == 403
+		assert (err as BotApiError).description == 'Chat is closed'
+	}
+	if _ := bot.updates() {
+		assert false, 'accepted a failed bot response'
+	} else {
+		assert err.code() == 429
+		assert (err as BotApiError).status_code == 200
+	}
+	if _ := bot.updates() {
+		assert false, 'accepted a missing bot result'
+	} else {
+		assert err.msg().contains('Missing result')
+	}
+	if _ := new_bot('token with spaces') {
+		assert false, 'accepted an invalid bot token'
+	}
+	if _ := new('fixture-session')!.open_bot_chat('../examplebot') {
+		assert false, 'accepted an invalid bot username'
+	}
 	done.wait()
 }

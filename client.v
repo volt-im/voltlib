@@ -23,12 +23,7 @@ pub:
 // new creates a client with an existing session token. An empty token creates
 // an anonymous client.
 pub fn new(token string, options ClientOptions) !Client {
-	base_url := options.base_url.trim_right('/')
-	origin := urllib.parse(base_url) or { return error('Invalid Volt base URL') }
-	if origin.scheme !in ['http', 'https'] || origin.hostname() == '' || origin.path != ''
-		|| base_url.contains_any('@?#') {
-		return error('Volt base URL must be an HTTP or HTTPS origin')
-	}
+	origin := parse_volt_origin(options.base_url)!
 	for byte in token {
 		if byte < 0x21 || byte > 0x7e || byte in [`"`, `,`, `;`, `\\`] {
 			return error('Invalid Volt session token')
@@ -40,6 +35,16 @@ pub fn new(token string, options ClientOptions) !Client {
 		token:       token
 		cookie_name: if host == 'app.volt.im' { '__Host-volt-token' } else { 'token' }
 	}
+}
+
+fn parse_volt_origin(base_url string) !urllib.URL {
+	trimmed := base_url.trim_right('/')
+	origin := urllib.parse(trimmed) or { return error('Invalid Volt base URL') }
+	if origin.scheme !in ['http', 'https'] || origin.hostname() == '' || origin.path != ''
+		|| trimmed.contains_any('@?#') {
+		return error('Volt base URL must be an HTTP or HTTPS origin')
+	}
+	return origin
 }
 
 // str returns the client origin with credentials omitted.
@@ -114,26 +119,11 @@ struct ErrorResponse {
 }
 
 fn (client Client) request(method http.Method, path string, data string) !http.Response {
-	if client.base_url == '' {
-		return error('Volt request requires a configured client')
-	}
-	mut header := http.new_header(key: .accept, value: 'application/json')
-	if data != '' {
-		header.set(.content_type, 'application/json')
-	}
-	mut cookies := map[string]string{}
+	mut header := http.Header{}
 	if client.token != '' {
-		cookies[client.cookie_name] = client.token
+		header.set(.cookie, '${client.cookie_name}=${client.token}')
 	}
-	response := http.fetch(
-		url:            '${client.base_url}/api${path}'
-		method:         method
-		header:         header
-		data:           data
-		cookies:        cookies
-		allow_redirect: false
-		max_retries:    1
-	)!
+	response := fetch_volt_response(client.base_url, method, '/api' + path, data, mut header)!
 	if response.status_code >= 200 && response.status_code < 300 {
 		return response
 	}
@@ -153,6 +143,24 @@ fn (client Client) request(method http.Method, path string, data string) !http.R
 		detail:       detail
 		remaining_ms: body.remaining_ms
 	}
+}
+
+fn fetch_volt_response(base_url string, method http.Method, path string, data string, mut header http.Header) !http.Response {
+	if base_url == '' {
+		return error('Volt request requires a configured client')
+	}
+	header.set(.accept, 'application/json')
+	if data != '' {
+		header.set(.content_type, 'application/json')
+	}
+	return http.fetch(
+		url:            base_url + path
+		method:         method
+		header:         header
+		data:           data
+		allow_redirect: false
+		max_retries:    1
+	)
 }
 
 fn (client Client) request_json[T](method http.Method, path string, data string) !T {
